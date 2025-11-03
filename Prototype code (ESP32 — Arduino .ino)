@@ -1,0 +1,218 @@
+/* Smart Health Guard - Prototype for ESP32
+   Reads MAX30102 (HR + SpO2 raw), DHT11 (temp/humidity), MPU6050 (accel)
+   Uploads to ThingSpeak via HTTP every INTERVAL seconds.
+
+   Notes:
+   - SpO2 calculation here is a simple approximation (use validated libs/algorithms for production).
+   - Replace WiFi/ThingSpeak API values with your own.
+   - Install required libraries: SparkFun MAX3010x, DHT by Adafruit, MPU6050 (Jeff Rowberg or similar).
+*/
+
+#include <Wire.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+// MAX3010x (SparkFun)
+#include <MAX30105.h>
+#include "heartRate.h"    // from SparkFun examples (if available)
+
+// DHT
+#include "DHT.h"
+
+// MPU6050 (use the library you prefer; this is a minimal example)
+#include "MPU6050.h"  // if you use a different library, adapt reading calls
+
+// ---------- CONFIG ----------
+const char* ssid     = "YOUR_SSID";
+const char* password = "YOUR_PASSWORD";
+
+const char* THINGSPEAK_API_KEY = "YOUR_THINGSPEAK_WRITE_KEY";
+const char* THINGSPEAK_HOST = "http://api.thingspeak.com/update";
+
+#define DHTPIN 4
+#define DHTTYPE DHT11
+
+#define INTERVAL 15          // seconds between uploads
+#define ALERT_HEARTRATE_HIGH 130
+#define ALERT_HEARTRATE_LOW 40
+#define ALERT_TEMPERATURE_HIGH 38.0
+
+// ---------- DEVICES ----------
+MAX30105 particleSensor;
+DHT dht(DHTPIN, DHTTYPE);
+MPU6050 mpu(Wire);
+
+// For heart rate algorithm
+const byte RATE_SIZE = 4; // average over 4 readings
+byte rates[RATE_SIZE]; 
+byte rateSpot = 0;
+long lastBeat = 0;
+float beatsPerMinute;
+int beatAvg;
+
+// ---------- SETUP ----------
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+
+  // Wi-Fi
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting WiFi");
+  int wifiRetries = 0;
+  while (WiFi.status() != WL_CONNECTED && wifiRetries < 20) {
+    delay(500);
+    Serial.print(".");
+    wifiRetries++;
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println();
+    Serial.print("Connected. IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println();
+    Serial.println("WiFi not connected. Proceeding offline.");
+  }
+
+  // MAX30105 init
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    Serial.println("MAX30105 was not found. Check wiring.");
+  } else {
+    Serial.println("MAX30105 found.");
+    particleSensor.setup(); // default configuration
+    particleSensor.setPulseAmplitudeRed(0x0A); // check sensor datasheet & examples
+    particleSensor.setPulseAmplitudeGreen(0);
+  }
+
+  // DHT init
+  dht.begin();
+
+  // MPU6050 init
+  mpu.begin();
+  mpu.calcGyroOffsets(true); // calibrate; takes a short moment
+
+  Serial.println("Setup complete.");
+}
+
+// ---------- HELPER: read MAX3010x and try to compute BPM ----------
+int getHeartRate() {
+  // This example uses a basic heartRate algorithm from SparkFun examples.
+  long irValue = particleSensor.getIR();
+
+  if (irValue > 50000) { // finger present threshold (tweak as needed)
+    if (checkForBeat(irValue)) {
+      long delta = millis() - lastBeat;
+      lastBeat = millis();
+      beatsPerMinute = 60 / (delta / 1000.0);
+
+      if (beatsPerMinute < 255 && beatsPerMinute > 20) {
+        rates[rateSpot++] = (byte)beatsPerMinute;
+        rateSpot %= RATE_SIZE;
+        beatAvg = 0;
+        for (byte x = 0 ; x < RATE_SIZE ; x++)
+          beatAvg += rates[x];
+        beatAvg /= RATE_SIZE;
+        return beatAvg;
+      }
+    }
+  } else {
+    // No finger or poor reading
+    return -1;
+  }
+  return -1;
+}
+
+// ---------- HELPER: approximate SpO2 (very rough) ----------
+float estimateSpO2() {
+  // Real SpO2 needs AC/DC ratio of red and IR channels and algorithm.
+  // Here we return a dummy / placeholder value or simple heuristic.
+  // WARNING: Not clinically accurate. Use proper algorithms/libraries for production.
+  int ir = particleSensor.getIR();
+  int red = particleSensor.getRed();
+  if (ir <= 0 || red <= 0) return -1.0;
+
+  float ratio = 0;
+  if (ir != 0) ratio = (float)red / (float)ir;
+  // crude mapping: ratio closer to 1 -> lower SpO2; adjust empirically:
+  float spo2 = 110.0 - (ratio * 25.0);
+  if (spo2 > 100) spo2 = 100;
+  if (spo2 < 50) spo2 = 50;
+  return spo2;
+}
+
+// ---------- MAIN LOOP ----------
+unsigned long lastMillis = 0;
+void loop() {
+  // Read sensors frequently for heart rate
+  particleSensor.check(); // read FIFO
+
+  static int heartRate = -1;
+  int hr = getHeartRate();
+  if (hr > 0) heartRate = hr;
+
+  // Read temperature and humidity every loop (DHT is slow but OK)
+  float temperature = dht.readTemperature(); // Celsius
+  float humidity = dht.readHumidity();
+
+  // Read accel from MPU6050
+  mpu.update();
+  float ax = mpu.getAccX();
+  float ay = mpu.getAccY();
+  float az = mpu.getAccZ();
+
+  // Simple motion / fall detection: large change in total accel magnitude
+  static float lastAccelMag = 0;
+  float accelMag = sqrt(ax*ax + ay*ay + az*az);
+  bool potentialFall = false;
+  if (abs(accelMag - lastAccelMag) > 2.5) potentialFall = true; // threshold, tune later
+  lastAccelMag = accelMag;
+
+  // SpO2 approx
+  float spo2 = estimateSpO2();
+
+  // Print values locally
+  Serial.println("------ Readings ------");
+  Serial.print("Heart Rate (BPM): "); Serial.println(heartRate);
+  Serial.print("SpO2 (%): "); Serial.println(spo2);
+  Serial.print("Temperature (C): "); Serial.println(temperature);
+  Serial.print("Humidity (%): "); Serial.println(humidity);
+  Serial.print("Accel Mag: "); Serial.println(accelMag);
+  Serial.print("Potential fall: "); Serial.println(potentialFall ? "YES" : "no");
+  Serial.println("----------------------");
+
+  // Check simple alert conditions
+  if (heartRate > ALERT_HEARTRATE_HIGH || heartRate < ALERT_HEARTRATE_LOW || temperature > ALERT_TEMPERATURE_HIGH || potentialFall) {
+    Serial.println("ALERT: Condition exceeded threshold!");
+    // Here you can trigger buzzer, LED, or send immediate notification
+  }
+
+  // Upload to ThingSpeak every INTERVAL seconds
+  if (millis() - lastMillis > INTERVAL * 1000UL) {
+    lastMillis = millis();
+    if (WiFi.status() == WL_CONNECTED) {
+      HTTPClient http;
+      String url = String(THINGSPEAK_HOST) + "?api_key=" + THINGSPEAK_API_KEY;
+      url += "&field1=" + String(heartRate < 0 ? 0 : heartRate);
+      url += "&field2=" + String(spo2 < 0 ? 0 : spo2);
+      url += "&field3=" + String(temperature);
+      url += "&field4=" + String(humidity);
+      url += "&field5=" + String(accelMag);
+      Serial.print("Sending to ThingSpeak: ");
+      Serial.println(url);
+
+      http.begin(url);
+      int httpCode = http.GET();
+      if (httpCode > 0) {
+        Serial.print("ThingSpeak response: ");
+        Serial.println(httpCode);
+      } else {
+        Serial.print("ThingSpeak failed, error: ");
+        Serial.println(httpCode);
+      }
+      http.end();
+    } else {
+      Serial.println("WiFi not connected — skipping upload.");
+    }
+  }
+
+  delay(200); // small delay to avoid over-polling
+}
