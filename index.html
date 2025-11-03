@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Smart Health Guard Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f7f9fc; text-align: center; }
+    .card { background: white; box-shadow: 0 4px 8px rgba(0,0,0,0.1); border-radius: 10px; padding: 20px; margin: 20px auto; width: 300px; }
+    h2 { color: #1e90ff; }
+  </style>
+</head>
+<body>
+  <h1>🩺 Smart Health Guard Dashboard</h1>
+  <div class="card"><h2>Heart Rate:</h2><p id="hr">--</p></div>
+  <div class="card"><h2>Temperature:</h2><p id="temp">-- °C</p></div>
+  <div class="card"><h2>SpO₂:</h2><p id="spo2">-- %</p></div>
+
+  <script>
+    const channelID = "YOUR_THINGSPEAK_CHANNEL_ID";
+    const readAPIKey = "YOUR_READ_API_KEY";
+
+    async function fetchData() {
+      const url = `https://api.thingspeak.com/channels/${channelID}/feeds.json?results=1&api_key=${readAPIKey}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      const feed = data.feeds[0];
+      document.getElementById("hr").textContent = feed.field1 || "--";
+      document.getElementById("temp").textContent = feed.field3 + " °C";
+      document.getElementById("spo2").textContent = feed.field2 + " %";
+    }
+
+    fetchData();
+    setInterval(fetchData, 10000); // refresh every 10 seconds
+  </script>
+</body>
+</html>
