@@ -1,0 +1,32 @@
+What this example uses (common setup)
+
+Microcontroller: ESP32
+
+Heart & SpO₂: MAX30102 (or MAX30105)
+
+Temp/Humidity: DHT11 (swap to DHT22 if you have it)
+
+Motion / fall detection: MPU6050 (accelerometer)
+
+Cloud: ThingSpeak (easy HTTP POST) — replace with Blynk/Firebase later if you prefer
+
+Libraries to install (Arduino IDE -> Manage Libraries)
+
+SparkFun MAX3010x (or search for MAX30105) — SparkFun library that provides raw reading and examples.
+
+DHT sensor library (by Adafruit)
+
+MPU6050 (Jeff Rowberg or MPU6050_light — any commonly used)
+
+ThingSpeak (optional) or use HTTPClient (we use HTTPClient in code, so ThingSpeak lib not required)
+
+And built-in: WiFi.h, Wire.h, HTTPClient.h
+
+Wiring (summary)
+
+MAX30102: VCC → 3.3V, GND → GND, SDA → GPIO21 (ESP32), SCL → GPIO22
+
+DHT11: VCC → 3.3V (or 5V depending on module), GND → GND, DATA → GPIO4 (example)
+
+MPU6050: VCC → 3.3V (or 5V per module), GND → GND, SDA → GPIO21, SCL → GPIO22
+(If MAX30102 and MPU6050 share I²C pins, that's fine — both on same bus)
